@@ -371,27 +371,10 @@ class MediaPipeEyeDetector:
             x2, y2 = np.max(pts[:, 0]), np.max(pts[:, 1])
             face_rect = (max(0, int(x1)), max(0, int(y1)), min(w, int(x2)), min(h, int(y2)))
         
-        # Candidate corners (prefer right side): TR, BR, TL, BL
+        # Fixed position: bottom-left corner
         margin = 12
-        candidates = [
-            (w - panel_width - margin, margin),
-            (w - panel_width - margin, h - panel_height - margin),
-            (margin, margin),
-            (margin, h - panel_height - margin),
-        ]
-        
-        def overlaps(r1, r2):
-            (x1, y1, x2, y2) = r1
-            (a1, b1, a2, b2) = r2
-            return not (x2 <= a1 or a2 <= x1 or y2 <= b1 or b2 <= y1)
-        
-        panel_x, panel_y = candidates[0]
-        if face_rect is not None:
-            for cx, cy in candidates:
-                panel_rect = (cx, cy, cx + panel_width, cy + panel_height)
-                if not overlaps(panel_rect, face_rect):
-                    panel_x, panel_y = cx, cy
-                    break
+        panel_x = margin
+        panel_y = max(0, h - panel_height - margin)
         
         # Add semi-transparent background
         overlay = output_frame.copy()

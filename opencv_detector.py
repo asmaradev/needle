@@ -383,28 +383,10 @@ class OpenCVEyeDetector:
             x, y, fw, fh = results['face_rect']
             face_rect = (max(0, x), max(0, y), min(w, x + fw), min(h, y + fh))
 
-        # Candidate corners (prefer right side): top-right, bottom-right, top-left, bottom-left
+        # Fixed position: bottom-left corner
         margin = 12
-        candidates = [
-            (w - panel_width - margin, margin),  # TR
-            (w - panel_width - margin, h - panel_height - margin),  # BR
-            (margin, margin),  # TL
-            (margin, h - panel_height - margin),  # BL
-        ]
-
-        def overlaps(r1, r2):
-            (x1, y1, x2, y2) = r1
-            (a1, b1, a2, b2) = r2
-            return not (x2 <= a1 or a2 <= x1 or y2 <= b1 or b2 <= y1)
-
-        # Choose first non-overlapping candidate; fallback to first
-        panel_x, panel_y = candidates[0]
-        if face_rect is not None:
-            for cx, cy in candidates:
-                panel_rect = (cx, cy, cx + panel_width, cy + panel_height)
-                if not overlaps(panel_rect, face_rect):
-                    panel_x, panel_y = cx, cy
-                    break
+        panel_x = margin
+        panel_y = max(0, h - panel_height - margin)
 
         # Semi-transparent background behind the panel area
         overlay = output_frame.copy()

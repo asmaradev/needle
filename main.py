@@ -52,7 +52,12 @@ class NEEDLELivenessApp:
         self.last_plot_update = 0.0
         self.plot_update_interval = 0.2  # seconds
         # Plot styling
-        self.analysis_title_fontsize = 10
+        self.analysis_title_fontsize = 9
+        self.analysis_label_fontsize = 8
+        self.analysis_tick_fontsize = 7
+        self.analysis_legend_fontsize = 7
+        self.analysis_title_pad = 6
+        self.analysis_label_pad = 2
         
         # Performance tracking
         self.performance_history = {
@@ -214,7 +219,7 @@ class NEEDLELivenessApp:
     def setup_analysis_panel(self):
         """Setup component analysis panel with plots"""
         # Create matplotlib figure
-        self.fig, self.axes = plt.subplots(2, 3, figsize=(12, 8))
+        self.fig, self.axes = plt.subplots(2, 3, figsize=(12, 8), constrained_layout=True)
         # self.fig.suptitle('NEEDLE Component Analysis')
         
         # Map axes to components and set titles
@@ -225,9 +230,12 @@ class NEEDLELivenessApp:
         ]
         for ax, comp_name, title in zip(self.axes.flat, self.component_names, titles):
             self.axis_component_map[ax] = comp_name
-            ax.set_title(title, fontsize=self.analysis_title_fontsize)
+            ax.set_title(title, fontsize=self.analysis_title_fontsize, pad=self.analysis_title_pad)
             ax.set_ylim(0, 1)
             ax.grid(True, linestyle='--', alpha=0.3)
+            ax.set_xlabel('Frame', fontsize=self.analysis_label_fontsize, labelpad=self.analysis_label_pad)
+            ax.set_ylabel('Score', fontsize=self.analysis_label_fontsize, labelpad=self.analysis_label_pad)
+            ax.tick_params(axis='both', labelsize=self.analysis_tick_fontsize)
         
         # Create canvas
         self.canvas = FigureCanvasTkAgg(self.fig, self.analysis_frame)
@@ -497,26 +505,28 @@ Winner:
                 # Preserve existing title based on component
                 title = ax.get_title() if ax.get_title() else comp_name.replace('_', ' ').title()
                 ax.clear()
-                ax.set_title(title, pad=10, fontsize=self.analysis_title_fontsize)
+                ax.set_title(title, pad=self.analysis_title_pad, fontsize=self.analysis_title_fontsize)
                 ax.set_ylim(0, 1)
                 ax.grid(True, linestyle='--', alpha=0.3)
-                ax.set_xlabel('Frame', labelpad=4)
-                ax.set_ylabel('Score', labelpad=4)
+                ax.set_xlabel('Frame', fontsize=self.analysis_label_fontsize, labelpad=self.analysis_label_pad)
+                ax.set_ylabel('Score', fontsize=self.analysis_label_fontsize, labelpad=self.analysis_label_pad)
+                ax.tick_params(axis='both', labelsize=self.analysis_tick_fontsize)
                 ax.margins(x=0.02, y=0.1)
 
                 data = list(self.component_history.get(comp_name, [])) if comp_name else []
                 if data:
-                    ax.plot(data, color='tab:blue', linewidth=1.5, label='Score')
+                    ax.plot(data, color='tab:blue', linewidth=1.3, label='Score')
                     ax.set_xlim(0, max(50, len(data)))
                 else:
-                    ax.text(0.5, 0.5, 'No data yet', ha='center', va='center', fontsize=9, alpha=0.6)
+                    ax.text(0.5, 0.5, 'No data yet', ha='center', va='center', fontsize=8, alpha=0.6)
                 # Threshold line for clearer comparison
                 ax.axhline(threshold, color='tab:red', linestyle='--', linewidth=1, label=f'Threshold {threshold:.2f}')
                 # Add legend to clarify plotted elements
-                ax.legend(loc='upper right', fontsize=8, frameon=False)
+                ax.legend(loc='upper right', fontsize=self.analysis_legend_fontsize, frameon=False)
 
             # Improve spacing to avoid overlaps between axes labels and titles
-            self.fig.subplots_adjust(top=0.90, bottom=0.08, left=0.08, right=0.98, wspace=0.35, hspace=0.45)
+            if not self.fig.get_constrained_layout():
+                self.fig.subplots_adjust(top=0.92, bottom=0.08, left=0.07, right=0.98, wspace=0.30, hspace=0.40)
             self.canvas.draw_idle()
         except Exception as e:
             print(f"Error updating analysis plots: {e}")

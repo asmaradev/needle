@@ -516,10 +516,17 @@ Winner:
     def display_frame(self, frame):
         """Display frame in GUI"""
         try:
-            # Resize frame to fit display
-            display_height = 400
+            # Resize frame to fit display - make the camera view wider by targeting a larger width
             aspect_ratio = frame.shape[1] / frame.shape[0]
-            display_width = int(display_height * aspect_ratio)
+            target_width = getattr(Config, 'DISPLAY_WIDTH', 800)
+            # Compute height from width to preserve aspect
+            display_width = int(target_width)
+            display_height = int(display_width / aspect_ratio)
+            # Optional: clamp to a maximum height to avoid oversized images
+            max_height = getattr(Config, 'DISPLAY_MAX_HEIGHT', 600)
+            if display_height > max_height:
+                display_height = max_height
+                display_width = int(display_height * aspect_ratio)
             
             frame_resized = cv2.resize(frame, (display_width, display_height))
             

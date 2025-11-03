@@ -327,6 +327,7 @@ class OpenCVEyeDetector:
     def draw_detailed_analysis(self, frame: np.ndarray, results: Dict) -> np.ndarray:
         """
         Draw detailed component analysis as six progress bars (similar to MediaPipe overlay)
+        - Auto-positions to avoid overlapping the user's face when possible.
         """
         output_frame = frame.copy()
         h, w = frame.shape[:2]
@@ -376,19 +377,48 @@ class OpenCVEyeDetector:
 
                 y_offset += 25
 
-        # Overlay panel on the right-top corner
-        panel_x = w - panel_width - 10
-        panel_y = 10
+        # Determine face rectangle (if available) to avoid overlapping
+        face_rect = None
+        if results.get('face_rect') is not None:
+            x, y, fw, fh = results['face_rect']
+            face_rect = (max(0, x), max(0, y), min(w, x + fw), min(h, y + fh))
+
+        # Candidate corners (prefer right side): top-right, bottom-right, top-left, bottom-left
+        margin = 12
+        candidates = [
+            (w - panel_width - margin, margin),  # TR
+            (w - panel_width - margin, h - panel_height - margin),  # BR
+            (margin, margin),  # TL
+            (margin, h - panel_height - margin),  # BL
+        ]
+
+        def overlaps(r1, r2):
+            (x1, y1, x2, y2) = r1
+            (a1, b1, a2, b2) = r2
+            return not (x2 <= a1 or a2 <= x1 or y2 <= b1 or b2 <= y1)
+
+        # Choose first non-overlapping candidate; fallback to first
+        panel_x, panel_y = candidates[0]
+        if face_rect is not None:
+            for cx, cy in candidates:
+                panel_rect = (cx, cy, cx + panel_width, cy + panel_height)
+                if not overlaps(panel_rect, face_rect):
+                    panel_x, panel_y = cx, cy
+                    break
 
         # Semi-transparent background behind the panel area
         overlay = output_frame.copy()
         cv2.rectangle(overlay, (panel_x - 5, panel_y - 5),
                       (panel_x + panel_width + 5, panel_y + panel_height + 5),
                       (0, 0, 0), -1)
-        output_frame = cv2.addWeighted(output_frame, 0.7, overlay, 0.3, 0)
+        output_frame = cv2.addWeighted(output_frame, 0.75, overlay, 0.25, 0)
 
         # Paste panel
-        output_frame[panel_y:panel_y + panel_height, panel_x:panel_x + panel_width] = panel
+        # Clamp to image bounds just in case
+        px1, py1 = max(0, panel_x), max(0, panel_y)
+        px2, py2 = min(w, panel_x + panel_width), min(h, panel_y + panel_height)
+        panel_cropped = panel[0:(py2 - py1), 0:(px2 - px1)]
+        output_frame[py1:py2, px1:px2] = panel_cropped
 
         return output_frame
         

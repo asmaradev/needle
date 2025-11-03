@@ -323,7 +323,75 @@ class OpenCVEyeDetector:
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         return output_frame
-    
+        
+    def draw_detailed_analysis(self, frame: np.ndarray, results: Dict) -> np.ndarray:
+        """
+        Draw detailed component analysis as six progress bars (similar to MediaPipe overlay)
+        """
+        output_frame = frame.copy()
+        h, w = frame.shape[:2]
+
+        # Analysis panel dimensions
+        panel_width = 300
+        panel_height = 200
+        panel = np.zeros((panel_height, panel_width, 3), dtype=np.uint8)
+
+        if results.get('liveness_results'):
+            # Aggregate components across eyes by averaging
+            all_components: Dict[str, list] = {}
+            for result in results['liveness_results']:
+                components = result.get('components', {})
+                for comp_name, score in components.items():
+                    all_components.setdefault(comp_name, []).append(float(score))
+            avg_components = {name: float(np.mean(scores)) for name, scores in all_components.items()}
+
+            # Draw component bars
+            y_offset = 20
+            # Keep a consistent order when possible
+            preferred_order = [
+                'blink_pattern', 'saccade_pattern', 'microsaccade_pattern',
+                'pupil_variation', 'temporal_consistency', 'movement_naturalness'
+            ]
+            items = [(name, avg_components[name]) for name in preferred_order if name in avg_components]
+            # Append any remaining components not in preferred list
+            for name, val in avg_components.items():
+                if name not in preferred_order:
+                    items.append((name, val))
+
+            for comp_name, score in items:
+                # Component name
+                cv2.putText(panel, comp_name.replace('_', ' ').title(),
+                            (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
+                # Score bar
+                bar_width = int(200 * max(0.0, min(1.0, score)))
+                # Green if above threshold 0.6, yellow if >0.3, else red
+                color = (0, 255, 0) if score > 0.6 else ((0, 255, 255) if score > 0.3 else (0, 0, 255))
+                cv2.rectangle(panel, (10, y_offset + 5), (10 + bar_width, y_offset + 15), color, -1)
+                cv2.rectangle(panel, (10, y_offset + 5), (210, y_offset + 15), (128, 128, 128), 1)
+
+                # Score value
+                cv2.putText(panel, f"{score:.3f}", (220, y_offset + 12),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
+
+                y_offset += 25
+
+        # Overlay panel on the right-top corner
+        panel_x = w - panel_width - 10
+        panel_y = 10
+
+        # Semi-transparent background behind the panel area
+        overlay = output_frame.copy()
+        cv2.rectangle(overlay, (panel_x - 5, panel_y - 5),
+                      (panel_x + panel_width + 5, panel_y + panel_height + 5),
+                      (0, 0, 0), -1)
+        output_frame = cv2.addWeighted(output_frame, 0.7, overlay, 0.3, 0)
+
+        # Paste panel
+        output_frame[panel_y:panel_y + panel_height, panel_x:panel_x + panel_width] = panel
+
+        return output_frame
+        
     def reset(self):
         """Reset detector state"""
         self.liveness_detector.reset()

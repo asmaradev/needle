@@ -309,6 +309,8 @@ class NEEDLELivenessApp:
             # Choose which output to render based on current detector
             if self.current_detector == "opencv":
                 output_frame = self.opencv_detector.draw_results(frame, results_opencv)
+                # Add detailed analysis for OpenCV (six progress bars)
+                output_frame = self.opencv_detector.draw_detailed_analysis(output_frame, results_opencv)
             else:
                 output_frame = self.mediapipe_detector.draw_results(frame, results_mediapipe)
                 # Add detailed analysis for MediaPipe

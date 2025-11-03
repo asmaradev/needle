@@ -213,7 +213,7 @@ class NEEDLELivenessApp:
         """Setup component analysis panel with plots"""
         # Create matplotlib figure
         self.fig, self.axes = plt.subplots(2, 3, figsize=(12, 8))
-        self.fig.suptitle('NEEDLE Component Analysis')
+        # self.fig.suptitle('NEEDLE Component Analysis')
         
         # Map axes to components and set titles
         self.axis_component_map = {}
@@ -489,21 +489,32 @@ Winner:
     def update_analysis_plots(self):
         """Update component analysis plots"""
         try:
+            threshold = float(self.threshold_var.get()) if hasattr(self, 'threshold_var') else 0.6
             for ax in self.axes.flat:
                 comp_name = self.axis_component_map.get(ax)
                 # Preserve existing title based on component
                 title = ax.get_title() if ax.get_title() else comp_name.replace('_', ' ').title()
                 ax.clear()
-                ax.set_title(title)
+                ax.set_title(title, pad=10)
                 ax.set_ylim(0, 1)
                 ax.grid(True, linestyle='--', alpha=0.3)
+                ax.set_xlabel('Frame', labelpad=4)
+                ax.set_ylabel('Score', labelpad=4)
+                ax.margins(x=0.02, y=0.1)
+
                 data = list(self.component_history.get(comp_name, [])) if comp_name else []
                 if data:
-                    ax.plot(data, color='tab:blue', linewidth=1.5)
+                    ax.plot(data, color='tab:blue', linewidth=1.5, label='Score')
                     ax.set_xlim(0, max(50, len(data)))
                 else:
                     ax.text(0.5, 0.5, 'No data yet', ha='center', va='center', fontsize=9, alpha=0.6)
-            self.fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+                # Threshold line for clearer comparison
+                ax.axhline(threshold, color='tab:red', linestyle='--', linewidth=1, label=f'Threshold {threshold:.2f}')
+                # Add legend to clarify plotted elements
+                ax.legend(loc='upper right', fontsize=8, frameon=False)
+
+            # Improve spacing to avoid overlaps between axes labels and titles
+            self.fig.subplots_adjust(top=0.90, bottom=0.08, left=0.08, right=0.98, wspace=0.35, hspace=0.45)
             self.canvas.draw_idle()
         except Exception as e:
             print(f"Error updating analysis plots: {e}")

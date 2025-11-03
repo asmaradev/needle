@@ -16,6 +16,7 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import pandas as pd
+from collections import deque
 
 from opencv_detector import OpenCVEyeDetector
 from mediapipe_detector import MediaPipeEyeDetector
@@ -41,6 +42,15 @@ class NEEDLELivenessApp:
         self.camera = None
         self.benchmark_data = []
         self.start_time = None
+
+        # Component analysis state
+        self.component_names = [
+            'blink_pattern', 'saccade_pattern', 'microsaccade_pattern',
+            'pupil_variation', 'temporal_consistency', 'movement_naturalness'
+        ]
+        self.component_history = {name: deque(maxlen=300) for name in self.component_names}
+        self.last_plot_update = 0.0
+        self.plot_update_interval = 0.2  # seconds
         
         # Performance tracking
         self.performance_history = {
@@ -204,6 +214,18 @@ class NEEDLELivenessApp:
         # Create matplotlib figure
         self.fig, self.axes = plt.subplots(2, 3, figsize=(12, 8))
         self.fig.suptitle('NEEDLE Component Analysis')
+        
+        # Map axes to components and set titles
+        self.axis_component_map = {}
+        titles = [
+            'Blink Pattern', 'Saccade Pattern', 'Microsaccade Pattern',
+            'Pupil Variation', 'Temporal Consistency', 'Movement Naturalness'
+        ]
+        for ax, comp_name, title in zip(self.axes.flat, self.component_names, titles):
+            self.axis_component_map[ax] = comp_name
+            ax.set_title(title)
+            ax.set_ylim(0, 1)
+            ax.grid(True, linestyle='--', alpha=0.3)
         
         # Create canvas
         self.canvas = FigureCanvasTkAgg(self.fig, self.analysis_frame)
@@ -418,11 +440,20 @@ Winner:
                             all_components[comp_name] = []
                         all_components[comp_name].append(score)
                 
-                # Update component labels
+                # Update component labels and append to history for plotting
                 for comp_name, label in self.component_labels.items():
                     if comp_name in all_components:
                         avg_comp_score = np.mean(all_components[comp_name])
                         label.config(text=f"{comp_name.replace('_', ' ').title()}: {avg_comp_score:.3f}")
+                        # Append to history buffer
+                        if comp_name in self.component_history:
+                            self.component_history[comp_name].append(float(avg_comp_score))
+                
+                # Throttle plot updates to reduce overhead
+                now = time.time()
+                if now - self.last_plot_update >= self.plot_update_interval:
+                    self.update_analysis_plots()
+                    self.last_plot_update = now
             else:
                 self.needle_score_label.config(text="NEEDLE Score: 0.000")
                 self.liveness_status_label.config(text="Status: No Eyes Detected", foreground="orange")
@@ -457,13 +488,25 @@ Winner:
     
     def update_analysis_plots(self):
         """Update component analysis plots"""
-        # This would be implemented to show real-time component analysis
-        # For now, just clear the plots
-        for ax in self.axes.flat:
-            ax.clear()
-            ax.set_title("Component Analysis")
-        
-        self.canvas.draw()
+        try:
+            for ax in self.axes.flat:
+                comp_name = self.axis_component_map.get(ax)
+                # Preserve existing title based on component
+                title = ax.get_title() if ax.get_title() else comp_name.replace('_', ' ').title()
+                ax.clear()
+                ax.set_title(title)
+                ax.set_ylim(0, 1)
+                ax.grid(True, linestyle='--', alpha=0.3)
+                data = list(self.component_history.get(comp_name, [])) if comp_name else []
+                if data:
+                    ax.plot(data, color='tab:blue', linewidth=1.5)
+                    ax.set_xlim(0, max(50, len(data)))
+                else:
+                    ax.text(0.5, 0.5, 'No data yet', ha='center', va='center', fontsize=9, alpha=0.6)
+            self.fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+            self.canvas.draw_idle()
+        except Exception as e:
+            print(f"Error updating analysis plots: {e}")
     
     def export_data(self):
         """Export benchmark data to file"""

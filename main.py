@@ -48,7 +48,11 @@ class NEEDLELivenessApp:
             'blink_pattern', 'saccade_pattern', 'microsaccade_pattern',
             'pupil_variation', 'temporal_consistency', 'movement_naturalness'
         ]
-        self.component_history = {name: deque(maxlen=300) for name in self.component_names}
+        # Maintain separate histories for each detector so we can compare them side-by-side
+        self.component_history_by_detector = {
+            'opencv': {name: deque(maxlen=300) for name in self.component_names},
+            'mediapipe': {name: deque(maxlen=300) for name in self.component_names}
+        }
         self.last_plot_update = 0.0
         self.plot_update_interval = 0.2  # seconds
         # Plot styling
@@ -292,22 +296,58 @@ class NEEDLELivenessApp:
             if not ret:
                 continue
             
-            # Process frame with current detector
+            # Process frame with both detectors so we can compare components side-by-side
+            try:
+                results_opencv = self.opencv_detector.process_frame(frame)
+            except Exception:
+                results_opencv = {'liveness_results': [], 'performance': {}}
+            try:
+                results_mediapipe = self.mediapipe_detector.process_frame(frame)
+            except Exception:
+                results_mediapipe = {'liveness_results': [], 'performance': {}}
+
+            # Choose which output to render based on current detector
             if self.current_detector == "opencv":
-                results = self.opencv_detector.process_frame(frame)
-                output_frame = self.opencv_detector.draw_results(frame, results)
+                output_frame = self.opencv_detector.draw_results(frame, results_opencv)
             else:
-                results = self.mediapipe_detector.process_frame(frame)
-                output_frame = self.mediapipe_detector.draw_results(frame, results)
+                output_frame = self.mediapipe_detector.draw_results(frame, results_mediapipe)
                 # Add detailed analysis for MediaPipe
-                output_frame = self.mediapipe_detector.draw_detailed_analysis(output_frame, results)
+                output_frame = self.mediapipe_detector.draw_detailed_analysis(output_frame, results_mediapipe)
             
-            # Update GUI
-            self.update_gui_metrics(results)
+            # Append component histories for both detectors
+            self._append_component_history('opencv', results_opencv)
+            self._append_component_history('mediapipe', results_mediapipe)
+            
+            # Update GUI metrics using the currently selected detector's results
+            results_for_gui = results_opencv if self.current_detector == "opencv" else results_mediapipe
+            self.update_gui_metrics(results_for_gui)
             self.display_frame(output_frame)
             
             # Small delay to prevent overwhelming the GUI
             time.sleep(0.01)
+    
+    def _append_component_history(self, detector_name, results):
+        """Append averaged component scores into per-detector history buffers."""
+        try:
+            if not results or not results.get('liveness_results'):
+                return
+            # Aggregate across all detected faces (if multiple) by averaging per component
+            all_components = {}
+            for r in results['liveness_results']:
+                comps = r.get('components', {})
+                for comp_name, score in comps.items():
+                    all_components.setdefault(comp_name, []).append(float(score))
+            # Append the averaged value per component into the history for the given detector
+            det_hist = self.component_history_by_detector.get(detector_name)
+            if not det_hist:
+                return
+            for comp_name in self.component_names:
+                if comp_name in all_components and comp_name in det_hist:
+                    avg_val = float(np.mean(all_components[comp_name]))
+                    det_hist[comp_name].append(avg_val)
+        except Exception as e:
+            # Keep UI responsive even if a single frame fails aggregation
+            print(f"Error appending component history for {detector_name}: {e}")
     
     def start_benchmark(self):
         """Start benchmarking both detectors"""
@@ -450,14 +490,11 @@ Winner:
                             all_components[comp_name] = []
                         all_components[comp_name].append(score)
                 
-                # Update component labels and append to history for plotting
+                # Update component labels (histories are handled in detection_loop)
                 for comp_name, label in self.component_labels.items():
                     if comp_name in all_components:
                         avg_comp_score = np.mean(all_components[comp_name])
                         label.config(text=f"{comp_name.replace('_', ' ').title()}: {avg_comp_score:.3f}")
-                        # Append to history buffer
-                        if comp_name in self.component_history:
-                            self.component_history[comp_name].append(float(avg_comp_score))
                 
                 # Throttle plot updates to reduce overhead
                 now = time.time()
@@ -497,7 +534,7 @@ Winner:
             print(f"Error displaying frame: {e}")
     
     def update_analysis_plots(self):
-        """Update component analysis plots"""
+        """Update component analysis plots (show both detectors)"""
         try:
             threshold = float(self.threshold_var.get()) if hasattr(self, 'threshold_var') else 0.6
             for ax in self.axes.flat:
@@ -513,10 +550,24 @@ Winner:
                 ax.tick_params(axis='both', labelsize=self.analysis_tick_fontsize)
                 ax.margins(x=0.02, y=0.1)
 
-                data = list(self.component_history.get(comp_name, [])) if comp_name else []
-                if data:
-                    ax.plot(data, color='tab:blue', linewidth=1.3, label='Score')
-                    ax.set_xlim(0, max(50, len(data)))
+                # Retrieve histories for both detectors
+                data_opencv = list(self.component_history_by_detector['opencv'].get(comp_name, [])) if comp_name else []
+                data_mediapipe = list(self.component_history_by_detector['mediapipe'].get(comp_name, [])) if comp_name else []
+
+                any_data = False
+                xlim_max = 50
+                if data_mediapipe:
+                    ax.plot(data_mediapipe, color='tab:blue', linewidth=1.3, label='MediaPipe')
+                    any_data = True
+                    xlim_max = max(xlim_max, len(data_mediapipe))
+                if data_opencv:
+                    # Use a yellow/gold tone for OpenCV as requested
+                    ax.plot(data_opencv, color='goldenrod', linewidth=1.3, label='OpenCV')
+                    any_data = True
+                    xlim_max = max(xlim_max, len(data_opencv))
+
+                if any_data:
+                    ax.set_xlim(0, xlim_max)
                 else:
                     ax.text(0.5, 0.5, 'No data yet', ha='center', va='center', fontsize=8, alpha=0.6)
                 # Threshold line for clearer comparison

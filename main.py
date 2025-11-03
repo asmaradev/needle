@@ -51,6 +51,8 @@ class NEEDLELivenessApp:
         self.component_history = {name: deque(maxlen=300) for name in self.component_names}
         self.last_plot_update = 0.0
         self.plot_update_interval = 0.2  # seconds
+        # Plot styling
+        self.analysis_title_fontsize = 10
         
         # Performance tracking
         self.performance_history = {
@@ -223,7 +225,7 @@ class NEEDLELivenessApp:
         ]
         for ax, comp_name, title in zip(self.axes.flat, self.component_names, titles):
             self.axis_component_map[ax] = comp_name
-            ax.set_title(title)
+            ax.set_title(title, fontsize=self.analysis_title_fontsize)
             ax.set_ylim(0, 1)
             ax.grid(True, linestyle='--', alpha=0.3)
         
@@ -495,7 +497,7 @@ Winner:
                 # Preserve existing title based on component
                 title = ax.get_title() if ax.get_title() else comp_name.replace('_', ' ').title()
                 ax.clear()
-                ax.set_title(title, pad=10)
+                ax.set_title(title, pad=10, fontsize=self.analysis_title_fontsize)
                 ax.set_ylim(0, 1)
                 ax.grid(True, linestyle='--', alpha=0.3)
                 ax.set_xlabel('Frame', labelpad=4)

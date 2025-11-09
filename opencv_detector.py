@@ -244,18 +244,30 @@ class OpenCVEyeDetector:
             # Extract eye landmarks
             eye_landmarks = self.extract_eye_landmarks(frame, eye_rect)
             
-            # Detect pupil
-            pupil_info = self.detect_pupil(frame, eye_rect)
+            # Detect pupil (pixel units)
+            pupil_info_draw = self.detect_pupil(frame, eye_rect)
+
+            # Normalize pupil radius by eye width for liveness
+            liveness_pupil_info = None
+            if pupil_info_draw is not None:
+                x_e, y_e, w_e, h_e = eye_rect
+                eye_width = float(max(w_e, 1))
+                liveness_pupil_info = (
+                    float(pupil_info_draw[0]),
+                    float(pupil_info_draw[1]),
+                    float(pupil_info_draw[2]) / eye_width
+                )
             
             # Analyze liveness
             if len(eye_landmarks) > 0:
                 liveness_result = self.liveness_detector.detect_liveness(
-                    eye_landmarks, pupil_info
+                    eye_landmarks, liveness_pupil_info
                 )
                 liveness_result['eye_index'] = i
                 liveness_result['eye_rect'] = eye_rect
                 liveness_result['landmarks'] = eye_landmarks
-                liveness_result['pupil_info'] = pupil_info
+                liveness_result['pupil_info'] = liveness_pupil_info
+                liveness_result['pupil_info_draw'] = pupil_info_draw
                 
                 results['liveness_results'].append(liveness_result)
         

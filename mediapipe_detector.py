@@ -92,26 +92,50 @@ class MediaPipeEyeDetector:
     
     def extract_eye_landmarks(self, face_landmarks: np.ndarray, eye_type: str = 'both') -> Dict[str, np.ndarray]:
         """
-        Extract eye landmarks from face landmarks
-        
-        Args:
-            face_landmarks: Full face landmark array
-            eye_type: 'left', 'right', or 'both'
-            
-        Returns:
-            Dictionary containing eye landmarks
+        Extract eye landmarks from face landmarks (FaceMesh order, 2D only)
+        Returns dict with 2D points for drawing/reference (not EAR layout).
         """
         eye_landmarks = {}
-        
         if eye_type in ['left', 'both']:
             left_eye_points = face_landmarks[self.left_eye_indices]
-            eye_landmarks['left'] = left_eye_points[:, :2]  # Remove z coordinate
-        
+            eye_landmarks['left'] = left_eye_points[:, :2]
         if eye_type in ['right', 'both']:
             right_eye_points = face_landmarks[self.right_eye_indices]
-            eye_landmarks['right'] = right_eye_points[:, :2]  # Remove z coordinate
-        
+            eye_landmarks['right'] = right_eye_points[:, :2]
         return eye_landmarks
+
+    def build_ear_layout(self, face_landmarks: np.ndarray, eye_side: str) -> Optional[np.ndarray]:
+        """
+        Build a 6-point EAR layout to match utils.EyeMovementAnalyzer expectation:
+        order: [leftmost, topmost, rightmost, bottommost, center_upper, center_lower]
+        Uses canonical FaceMesh indices for eyelids and corners.
+        """
+        try:
+            if eye_side == 'left':
+                left_corner = face_landmarks[33][:2]
+                right_corner = face_landmarks[133][:2]
+                top_lid = face_landmarks[159][:2]
+                bottom_lid = face_landmarks[145][:2]
+            else:  # right eye
+                left_corner = face_landmarks[263][:2]
+                right_corner = face_landmarks[362][:2]
+                top_lid = face_landmarks[386][:2]
+                bottom_lid = face_landmarks[374][:2]
+            # center x between corners
+            center_x = (left_corner[0] + right_corner[0]) / 2.0
+            center_upper = np.array([center_x, top_lid[1]])
+            center_lower = np.array([center_x, bottom_lid[1]])
+            layout = np.vstack([
+                np.array(left_corner),
+                np.array(top_lid),
+                np.array(right_corner),
+                np.array(bottom_lid),
+                center_upper,
+                center_lower
+            ])
+            return layout.astype(np.float32)
+        except Exception:
+            return None
     
     def extract_iris_landmarks(self, face_landmarks: np.ndarray) -> Dict[str, np.ndarray]:
         """
@@ -150,25 +174,17 @@ class MediaPipeEyeDetector:
     
     def get_eye_aspect_ratio(self, eye_landmarks: np.ndarray) -> float:
         """
-        Calculate Eye Aspect Ratio for blink detection
+        Calculate Eye Aspect Ratio for blink detection using 6-point EAR layout:
+        idx0-idx3: horizontal corners (left,right); (1,5) and (2,4) vertical pairs.
         """
         if len(eye_landmarks) < 6:
             return 0.0
-        
-        # For MediaPipe landmarks, we need to identify the correct points
-        # This is a simplified version - you might need to adjust indices
         try:
-            # Vertical distances
             A = np.linalg.norm(eye_landmarks[1] - eye_landmarks[5])
             B = np.linalg.norm(eye_landmarks[2] - eye_landmarks[4])
-            
-            # Horizontal distance
             C = np.linalg.norm(eye_landmarks[0] - eye_landmarks[3])
-            
-            # Eye aspect ratio
-            ear = (A + B) / (2.0 * C) if C > 0 else 0.0
-            return ear
-        except:
+            return (A + B) / (2.0 * C) if C > 0 else 0.0
+        except Exception:
             return 0.0
     
     def process_frame(self, frame: np.ndarray) -> Dict:
@@ -195,27 +211,44 @@ class MediaPipeEyeDetector:
             # Process each eye
             for eye_side in ['left', 'right']:
                 if eye_side in eye_landmarks_dict:
-                    eye_landmarks = eye_landmarks_dict[eye_side]
-                    
-                    # Get iris/pupil information
-                    pupil_info = None
+                    eye_landmarks_face = eye_landmarks_dict[eye_side]
+
+                    # Build 6-point EAR layout for NEEDLE and EAR computation
+                    ear_layout = self.build_ear_layout(face_landmarks, eye_side)
+
+                    # Get iris/pupil information (pixel units)
+                    pupil_info_draw = None
+                    liveness_pupil_info = None
                     if eye_side in iris_landmarks_dict:
                         iris_landmarks = iris_landmarks_dict[eye_side]
-                        pupil_info = self.calculate_pupil_info(iris_landmarks)
-                    
-                    # Analyze liveness
-                    if len(eye_landmarks) > 0:
+                        pupil_info_draw = self.calculate_pupil_info(iris_landmarks)
+
+                    # Normalize pupil radius by eye width for liveness
+                    if ear_layout is not None and pupil_info_draw is not None:
+                        eye_width = float(np.linalg.norm(ear_layout[0] - ear_layout[2]))
+                        if eye_width > 1e-6:
+                            liveness_pupil_info = (
+                                float(pupil_info_draw[0]),
+                                float(pupil_info_draw[1]),
+                                float(pupil_info_draw[2]) / eye_width
+                            )
+
+                    # Analyze liveness using EAR layout (fallback to face eye points if needed)
+                    input_landmarks = ear_layout if ear_layout is not None else eye_landmarks_face
+                    if input_landmarks is not None and len(input_landmarks) > 0:
                         liveness_result = self.liveness_detector.detect_liveness(
-                            eye_landmarks, pupil_info
+                            input_landmarks, liveness_pupil_info
                         )
-                        
+
                         # Add additional information
                         liveness_result['eye_side'] = eye_side
-                        liveness_result['landmarks'] = eye_landmarks
+                        liveness_result['landmarks'] = input_landmarks
                         liveness_result['iris_landmarks'] = iris_landmarks_dict.get(eye_side)
-                        liveness_result['pupil_info'] = pupil_info
-                        liveness_result['ear'] = self.get_eye_aspect_ratio(eye_landmarks)
-                        
+                        liveness_result['pupil_info'] = liveness_pupil_info
+                        liveness_result['pupil_info_draw'] = pupil_info_draw
+                        # EAR from EAR layout if available, else approximate from face eye points
+                        liveness_result['ear'] = self.get_eye_aspect_ratio(ear_layout) if ear_layout is not None else self.get_eye_aspect_ratio(eye_landmarks_face)
+
                         results['liveness_results'].append(liveness_result)
         
         # Record performance metrics

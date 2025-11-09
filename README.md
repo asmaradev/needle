@@ -57,7 +57,8 @@ pip install -r requirements.txt
 
 ### Quick Start
 ```bash
-python main.py
+python main.py or 
+pipenv run python main.py
 ```
 
 ### GUI Interface

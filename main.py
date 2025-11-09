@@ -408,6 +408,9 @@ class NEEDLELivenessApp:
                 if results['liveness_results']:
                     avg_score = np.mean([r['smoothed_score'] for r in results['liveness_results']])
                     liveness_scores.append(avg_score)
+                else:
+                    # Ensure coverage parity across detectors by counting no-detection frames
+                    liveness_scores.append(0.0)
                 
                 # Update progress
                 elapsed = time.time() - start_time

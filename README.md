@@ -301,3 +301,43 @@ For technical support or research collaboration:
 
 **NEEDLE** - Natural Eye-movement Evaluation for Detecting Live Entities
 *Advancing the state of liveness detection through micro eye-movement analysis*
+
+
+## 📊 Reproducing Benchmarks
+
+To validate the comparison between OpenCV and MediaPipe across lighting and glasses scenarios and to generate the four artifacts per scenario (opencv.png, mediapipe.png, report.png, graph.png), use the headless benchmark runner:
+
+1) With webcam (default camera index from `config.py`):
+```
+python benchmark.py --scenario light --duration 20
+python benchmark.py --scenario dim --duration 20
+python benchmark.py --scenario glasses --duration 20
+```
+
+2) With a video file:
+```
+python benchmark.py --scenario light --video /path/to/video.mp4 --duration 20
+```
+
+3) Optional live previews:
+```
+python benchmark.py --scenario dim --duration 20 --show
+```
+
+Outputs are saved under `tested/<scenario>/`:
+- `opencv.png` — Example frame with OpenCV annotations
+- `mediapipe.png` — Example frame with MediaPipe annotations
+- `report.png` — Summary comparison (Accuracy, Stability, FPS, Processing time)
+- `graph.png` — Time-series charts (EAR trend and detection hits)
+- `opencv_metrics.csv` / `mediapipe_metrics.csv` — Per-frame metrics
+- `summary.json` — Scenario summary used for the report
+
+Metric definitions:
+- Accuracy: fraction of frames with at least one valid eye liveness result.
+- Stability: composite of EAR standard deviation and pupil-center jitter (lower variability → higher stability score).
+- Speed: average processing time per frame (ms) and derived FPS.
+
+Interpretation guide:
+- Expect MediaPipe to show higher Accuracy and Stability, especially in dim light and with glasses.
+- Expect OpenCV to show lower processing time per frame (higher FPS) in many environments.
+- The NEEDLE score components are still available within detector internals; the benchmark focuses on system-level KPIs for comparability.

@@ -31,6 +31,8 @@ import math
 import argparse
 import numpy as np
 import pandas as pd
+import matplotlib as mpl
+mpl.use('Agg')
 import matplotlib.pyplot as plt
 import sys
 import platform
@@ -402,7 +404,7 @@ def plot_report(opencv_summary: Dict, mp_summary: Dict, out_path: str, scenario:
     stab = [nz(opencv_summary['stability'].get('stability_score')), nz(mp_summary['stability'].get('stability_score'))]
     spd = [nz(opencv_summary.get('fps')), nz(mp_summary.get('fps'))]
 
-    fig, ax = plt.subplots(1, 2, figsize=(12, 4))
+    fig, ax = plt.subplots(1, 2, figsize=(12, 4), constrained_layout=False)
 
     # Bar chart
     x = np.arange(len(labels))
@@ -446,7 +448,7 @@ def plot_report(opencv_summary: Dict, mp_summary: Dict, out_path: str, scenario:
     table.scale(1, 1.5)
 
     plt.tight_layout()
-    fig.savefig(out_path, dpi=200)
+    fig.savefig(out_path, dpi=200, bbox_inches='tight')
     plt.close(fig)
 
 
@@ -460,7 +462,7 @@ def plot_timeseries(opencv_pf: List[Dict], mp_pf: List[Dict], out_path: str, sce
     m_ear = [r['ear'] if r['ear'] is not None else np.nan for r in mp_pf]
     m_hit = [r['hit'] for r in mp_pf]
 
-    fig, ax = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+    fig, ax = plt.subplots(2, 1, figsize=(10, 6), sharex=True, constrained_layout=False)
 
     # EAR trends
     ax[0].plot(o_frames, o_ear, label='OpenCV EAR', color='#1f77b4', alpha=0.8)
@@ -480,7 +482,7 @@ def plot_timeseries(opencv_pf: List[Dict], mp_pf: List[Dict], out_path: str, sce
     ax[1].legend()
 
     plt.tight_layout()
-    fig.savefig(out_path, dpi=200)
+    fig.savefig(out_path, dpi=200, bbox_inches='tight')
     plt.close(fig)
 
 

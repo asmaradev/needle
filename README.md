@@ -341,3 +341,9 @@ Interpretation guide:
 - Expect MediaPipe to show higher Accuracy and Stability, especially in dim light and with glasses.
 - Expect OpenCV to show lower processing time per frame (higher FPS) in many environments.
 - The NEEDLE score components are still available within detector internals; the benchmark focuses on system-level KPIs for comparability.
+
+
+## Troubleshooting
+
+- Headless plotting: The benchmark runner (`benchmark.py`) forces the Matplotlib backend to `Agg` to avoid any Tk/Tkinter UI requirements and layout warnings. This ensures figures (`report.png`, `graph.png`) render cleanly in non‑GUI environments.
+- EAR divide‑by‑zero: The Eye Aspect Ratio computation is epsilon‑guarded in `utils.py` to prevent divide‑by‑zero when degenerate landmark geometry occurs (e.g., very small or collapsed horizontal eye width). This removes the `RuntimeWarning: divide by zero encountered in scalar divide` while preserving semantics (returns `0.0` in degenerate cases).

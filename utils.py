@@ -19,21 +19,28 @@ class EyeMovementAnalyzer:
         
     def calculate_eye_aspect_ratio(self, eye_landmarks: np.ndarray) -> float:
         """
-        Calculate Eye Aspect Ratio (EAR) for blink detection
+        Calculate Eye Aspect Ratio (EAR) for blink detection.
+        Guard against degenerate geometry (C≈0) to avoid divide-by-zero warnings.
         """
         if len(eye_landmarks) < 6:
             return 0.0
-            
+
         # Vertical eye landmarks
         A = euclidean(eye_landmarks[1], eye_landmarks[5])
         B = euclidean(eye_landmarks[2], eye_landmarks[4])
-        
-        # Horizontal eye landmark
+
+        # Horizontal eye landmark (denominator)
         C = euclidean(eye_landmarks[0], eye_landmarks[3])
-        
-        # Eye aspect ratio
-        ear = (A + B) / (2.0 * C)
-        return ear
+        eps = 1e-6
+        if C <= eps:
+            # Degenerate case (e.g., closed eye or detection glitch)
+            return 0.0
+
+        # Eye aspect ratio with numpy errstate to silence transient warnings
+        import numpy as _np
+        with _np.errstate(divide='ignore', invalid='ignore'):
+            ear = (A + B) / (2.0 * C)
+        return float(ear)
     
     def detect_blink(self, ear: float, threshold: float = 0.25) -> bool:
         """Detect blink based on Eye Aspect Ratio"""

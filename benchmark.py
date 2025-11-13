@@ -32,6 +32,8 @@ import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import sys
+import platform
 from typing import Dict, List, Optional, Tuple
 
 from opencv_detector import OpenCVEyeDetector
@@ -110,22 +112,41 @@ def run_on_stream(cap, detector_name: str, detector, duration: int, show: bool,
     start = time.time()
     frame_idx = 0
 
+    # Warm-up: attempt to grab a few frames to stabilize camera/video
+    warmup_end = time.time() + 1.0
+    while time.time() < warmup_end:
+        ret, _ = cap.read()
+        if not ret:
+            time.sleep(0.02)
+            continue
+        break
+
     per_frame = []  # rows dict
     detection_hits = []
     ears = []
     pupil_centers = []
 
     overlay_sample = None
-    sample_path = None
+    last_frame = None
+    last_results = None
 
     while time.time() - start < duration:
+        # Robust read with small retries
         ret, frame = cap.read()
+        retry = 0
+        while not ret and retry < 5:
+            time.sleep(0.02)
+            ret, frame = cap.read()
+            retry += 1
         if not ret:
-            break
+            # Could not read this iteration; continue loop instead of breaking to allow future frames
+            continue
 
         t0 = time.time()
         results = detector.process_frame(frame)
         dt = time.time() - t0
+        last_frame = frame
+        last_results = results
 
         # Aggregate per-frame
         liveness = results.get('liveness_results', [])
@@ -176,6 +197,17 @@ def run_on_stream(cap, detector_name: str, detector, duration: int, show: bool,
     accuracy = compute_detection_accuracy(detection_hits)
     stability = compute_stability_metrics(ears, pupil_centers)
 
+    # Ensure we have an overlay sample image even if none captured during loop
+    if overlay_sample is None:
+        if last_frame is not None and last_results is not None:
+            overlay_sample = detector.draw_results(last_frame, last_results)
+        else:
+            # Create a placeholder image
+            h, w = 480, 640
+            overlay_sample = np.zeros((h, w, 3), dtype=np.uint8)
+            cv2.putText(overlay_sample, f"{detector_name}: no frames captured",
+                        (20, int(h/2)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
     return {
         'per_frame': per_frame,
         'overlay_sample': overlay_sample,
@@ -186,27 +218,113 @@ def run_on_stream(cap, detector_name: str, detector, duration: int, show: bool,
     }
 
 
+def _preferred_backends_for_platform() -> List[int]:
+    sys_name = platform.system()
+    backends = []
+    # Note: getattr returns None if backend is missing; we'll filter those out later
+    if sys_name == 'Darwin':  # macOS
+        backends = [getattr(cv2, 'CAP_AVFOUNDATION', None)]
+    elif sys_name == 'Windows':
+        backends = [getattr(cv2, 'CAP_DSHOW', None), getattr(cv2, 'CAP_MSMF', None)]
+    else:  # Linux/Other
+        backends = [getattr(cv2, 'CAP_V4L2', None)]
+    # Fallback to default backend indicated by 0 (special path)
+    backends.append(0)
+    # Filter out Nones
+    return [b for b in backends if b is not None]
+
+
+def _try_open_camera(index: int, backends: List[int]):
+    last_err = None
+    for be in backends:
+        try:
+            cap = cv2.VideoCapture(index) if be == 0 else cv2.VideoCapture(index, be)
+            if cap.isOpened():
+                return cap, be
+            try:
+                cap.release()
+            except Exception:
+                pass
+        except Exception as e:
+            last_err = e
+            continue
+    if last_err:
+        raise last_err
+    return None, None
+
+
+def list_available_cameras(max_index: int = 5) -> List[int]:
+    """Probe camera indices from 0..max_index and return those that open successfully."""
+    ok = []
+    backends = _preferred_backends_for_platform()
+    print(f"Probing cameras with backends: {backends}")
+    for idx in range(0, max_index + 1):
+        cap, be = _try_open_camera(idx, backends)
+        if cap is not None and cap.isOpened():
+            print(f"  - index {idx} ✓ (backend={be})")
+            ok.append(idx)
+            cap.release()
+        else:
+            print(f"  - index {idx} ✗")
+    return ok
+
+
 def open_input_source(camera_index: int, video_path: Optional[str]):
     if video_path:
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video: {video_path}")
         return cap
-    cap = cv2.VideoCapture(camera_index)
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot access camera index {camera_index}")
-    # Apply config if available
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, Config.FRAME_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, Config.FRAME_HEIGHT)
-    cap.set(cv2.CAP_PROP_FPS, Config.FPS)
+
+    # Try preferred backends for this platform
+    backends = _preferred_backends_for_platform()
+    cap, used_backend = _try_open_camera(camera_index, backends)
+    if cap is None or not cap.isOpened():
+        # Auto-probe alternative indices 0..5
+        for alt_idx in range(0, 6):
+            if alt_idx == camera_index:
+                continue
+            cap, used_backend = _try_open_camera(alt_idx, backends)
+            if cap is not None and cap.isOpened():
+                print(f"Info: requested camera index {camera_index} not available; using {alt_idx} (backend={used_backend})")
+                camera_index = alt_idx
+                break
+    if cap is None or not cap.isOpened():
+        raise RuntimeError(
+            f"Cannot access any camera (tried index {camera_index} with backends {backends}). "
+            f"Use --list-cameras to probe indices or provide --video <path>."
+        )
+
+    # Apply config if available (set only after open)
+    try:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, Config.FRAME_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, Config.FRAME_HEIGHT)
+        cap.set(cv2.CAP_PROP_FPS, Config.FPS)
+    except Exception:
+        pass
+
+    # Reduce internal buffer to minimize stale frames (if supported)
+    try:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    except Exception:
+        pass
+
+    print(f"Opened camera index {camera_index} (backend={used_backend})")
     return cap
 
 
 def plot_report(opencv_summary: Dict, mp_summary: Dict, out_path: str, scenario: str):
     labels = ['Accuracy', 'Stability', 'Speed (FPS)']
-    acc = [opencv_summary['accuracy'], mp_summary['accuracy']]
-    stab = [opencv_summary['stability']['stability_score'], mp_summary['stability']['stability_score']]
-    spd = [opencv_summary['fps'], mp_summary['fps']]
+
+    def nz(v, default=0.0):
+        try:
+            return float(v) if v is not None and not math.isnan(float(v)) else float(default)
+        except Exception:
+            return float(default)
+
+    acc = [nz(opencv_summary.get('accuracy')), nz(mp_summary.get('accuracy'))]
+    stab = [nz(opencv_summary['stability'].get('stability_score')), nz(mp_summary['stability'].get('stability_score'))]
+    spd = [nz(opencv_summary.get('fps')), nz(mp_summary.get('fps'))]
 
     fig, ax = plt.subplots(1, 2, figsize=(12, 4))
 
@@ -218,18 +336,31 @@ def plot_report(opencv_summary: Dict, mp_summary: Dict, out_path: str, scenario:
     ax0.bar(x + width/2, [acc[1], stab[1], spd[1]], width, label='MediaPipe', color='#ff7f0e')
     ax0.set_xticks(x)
     ax0.set_xticklabels(labels)
-    ax0.set_ylim(0, 1.2*max(max(acc), max(stab), max(spd), 1))
+    ymax = max([1.0] + [v for v in acc + stab + spd if not math.isnan(v)])
+    ax0.set_ylim(0, 1.2 * ymax)
     ax0.set_title(f'NEEDLE Comparison - {scenario}')
     ax0.legend()
     ax0.grid(True, axis='y', alpha=0.3)
 
-    # Table of summaries
+    # Table of summaries with NA-friendly formatting
+    def fmt_pct(x):
+        return f"{x*100:.1f}%" if not math.isnan(x) else "NA"
+    def fmt3(x):
+        return f"{x:.3f}" if not math.isnan(x) else "NA"
+    def fmt2(x):
+        return f"{x:.2f}" if not math.isnan(x) else "NA"
+    def fmt1(x):
+        return f"{x:.1f}" if not math.isnan(x) else "NA"
+
+    ear_std_ocv = nz(opencv_summary['stability'].get('ear_std'), default=float('nan'))
+    jitter_ocv = nz(opencv_summary['stability'].get('pupil_jitter'), default=float('nan'))
+    ear_std_mp = nz(mp_summary['stability'].get('ear_std'), default=float('nan'))
+    jitter_mp = nz(mp_summary['stability'].get('pupil_jitter'), default=float('nan'))
+
     col_labels = ['Detector','Accuracy','EAR std↓','Pupil jitter↓','FPS','Proc ms↓']
     table_data = [
-        ['OpenCV', f"{opencv_summary['accuracy']*100:.1f}%", f"{opencv_summary['stability']['ear_std']:.3f}",
-         f"{opencv_summary['stability']['pupil_jitter']:.2f}", f"{opencv_summary['fps']:.1f}", f"{opencv_summary['avg_proc_ms']:.1f}"],
-        ['MediaPipe', f"{mp_summary['accuracy']*100:.1f}%", f"{mp_summary['stability']['ear_std']:.3f}",
-         f"{mp_summary['stability']['pupil_jitter']:.2f}", f"{mp_summary['fps']:.1f}", f"{mp_summary['avg_proc_ms']:.1f}"]
+        ['OpenCV', fmt_pct(acc[0]), fmt3(ear_std_ocv), fmt2(jitter_ocv), fmt1(spd[0]), fmt1(nz(opencv_summary.get('avg_proc_ms')))],
+        ['MediaPipe', fmt_pct(acc[1]), fmt3(ear_std_mp), fmt2(jitter_mp), fmt1(spd[1]), fmt1(nz(mp_summary.get('avg_proc_ms')))]
     ]
     ax1 = ax[1]
     ax1.axis('off')
@@ -278,7 +409,16 @@ def plot_timeseries(opencv_pf: List[Dict], mp_pf: List[Dict], out_path: str, sce
 
 
 def save_csv(per_frame: List[Dict], out_path: str):
-    df = pd.DataFrame(per_frame)
+    columns = ['frame', 'proc_ms', 'fps_reported', 'hit', 'ear']
+    if per_frame and len(per_frame) > 0:
+        df = pd.DataFrame(per_frame)
+        # ensure all expected columns exist
+        for c in columns:
+            if c not in df.columns:
+                df[c] = np.nan
+        df = df[columns]
+    else:
+        df = pd.DataFrame(columns=columns)
     df.to_csv(out_path, index=False)
 
 
@@ -286,27 +426,22 @@ def run_scenario(scenario: str, duration: int, camera_index: int, video_path: Op
     out_dir = os.path.join('tested', scenario)
     ensure_dir(out_dir)
 
-    cap = open_input_source(camera_index, video_path)
-
     # Instantiate detectors fresh per scenario to reset internal stats
     ocv = OpenCVEyeDetector()
     mpd = MediaPipeEyeDetector()
 
+    # Run OpenCV with a fresh capture
     print(f"Running OpenCV for scenario '{scenario}'...")
-    ocv_summary = run_on_stream(cap, 'OpenCV', ocv, duration, show)
+    cap1 = open_input_source(camera_index, video_path)
+    ocv_summary = run_on_stream(cap1, 'OpenCV', ocv, duration, show)
+    cap1.release()
 
-    # Rewind or reopen for MediaPipe run
-    if video_path:
-        cap.release()
-        cap = open_input_source(camera_index, video_path)
-    else:
-        # For webcam, run back-to-back; conditions may drift slightly
-        pass
-
+    # Run MediaPipe with a fresh capture (rewind video or reopen camera)
     print(f"Running MediaPipe for scenario '{scenario}'...")
-    mp_summary = run_on_stream(cap, 'MediaPipe', mpd, duration, show)
+    cap2 = open_input_source(camera_index, video_path)
+    mp_summary = run_on_stream(cap2, 'MediaPipe', mpd, duration, show)
+    cap2.release()
 
-    cap.release()
     if show:
         try:
             cv2.destroyAllWindows()
@@ -360,13 +495,28 @@ def parse_args():
     p.add_argument('--video', type=str, default=None, help='Optional video file to evaluate instead of webcam')
     p.add_argument('--show', dest='show', action='store_true', help='Show live preview windows')
     p.add_argument('--no-show', dest='show', action='store_false', help='Disable preview windows')
-    p.set_defaults(show=False)
+    p.add_argument('--list-cameras', dest='list_cameras', action='store_true', help='Probe and list available camera indices and exit')
+    p.add_argument('--probe', dest='list_cameras', action='store_true', help='Alias for --list-cameras')
+    p.set_defaults(show=False, list_cameras=False)
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-    run_scenario(args.scenario, args.duration, args.camera, args.video, args.show)
+    if args.list_cameras and args.video is None:
+        # Only probe cameras when not using a video file
+        list_available_cameras(max_index=5)
+        return
+    try:
+        run_scenario(args.scenario, args.duration, args.camera, args.video, args.show)
+    except RuntimeError as e:
+        # Friendly error without Python traceback
+        print(f"Error: {e}")
+        print("Hints:"
+              "\n - Try a different camera index (e.g., --camera 1 or --camera 2)."
+              "\n - Run --list-cameras to see which indices are available."
+              "\n - Or supply a video file with --video /path/to/file.mp4")
+        sys.exit(2)
 
 
 if __name__ == '__main__':

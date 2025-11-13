@@ -107,19 +107,65 @@ def draw_and_capture_sample(frame: np.ndarray, detector_name: str, detector, res
     cv2.imwrite(out_path, annotated)
 
 
+def _apply_overlay_normalization(img: np.ndarray, gamma: float = 1.0, use_clahe: bool = False) -> np.ndarray:
+    """Optionally brighten overlays without affecting metrics.
+    - gamma > 1.0 brightens (gamma correction in linearized fashion)
+    - use_clahe applies CLAHE to the luma channel
+    """
+    if img is None:
+        return img
+    out = img.copy()
+    try:
+        if use_clahe:
+            ycrcb = cv2.cvtColor(out, cv2.COLOR_BGR2YCrCb)
+            y = ycrcb[:, :, 0]
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            y = clahe.apply(y)
+            ycrcb[:, :, 0] = y
+            out = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
+        if gamma and abs(gamma - 1.0) > 1e-3:
+            inv_gamma = 1.0 / max(gamma, 1e-6)
+            table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in range(256)]).astype("uint8")
+            out = cv2.LUT(out, table)
+    except Exception:
+        # Fallback to original if any operation fails
+        out = img
+    return out
+
+
+def _stamp_overlay_info(img: np.ndarray, scenario: str, detector_name: str) -> np.ndarray:
+    """Add small text with scenario and mean luma to the overlay image for diagnostics."""
+    if img is None:
+        return img
+    try:
+        y = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)[:, :, 0]
+        mean_luma = float(np.mean(y))
+        text = f"{scenario} | {detector_name} | meanY: {mean_luma:.1f}"
+        cv2.putText(img, text, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    except Exception:
+        pass
+    return img
+
+
 def run_on_stream(cap, detector_name: str, detector, duration: int, show: bool,
-                  overlay_sample_every: int = 30) -> Dict:
+                  overlay_sample_every: int = 30,
+                  warmup_sec: float = 2.5) -> Dict:
     start = time.time()
     frame_idx = 0
 
-    # Warm-up: attempt to grab a few frames to stabilize camera/video
-    warmup_end = time.time() + 1.0
+    # Warm-up: attempt to grab frames for a while to let auto-exposure/white-balance settle
+    warmup_end = time.time() + max(0.0, float(warmup_sec))
     while time.time() < warmup_end:
-        ret, _ = cap.read()
+        ret, frame_wu = cap.read()
         if not ret:
             time.sleep(0.02)
             continue
-        break
+        if show:
+            try:
+                cv2.imshow(f'{detector_name} Warmup', frame_wu)
+                cv2.waitKey(1)
+            except Exception:
+                pass
 
     per_frame = []  # rows dict
     detection_hits = []
@@ -269,7 +315,7 @@ def list_available_cameras(max_index: int = 5) -> List[int]:
     return ok
 
 
-def open_input_source(camera_index: int, video_path: Optional[str]):
+def open_input_source(camera_index: int, video_path: Optional[str], cam_opts: Optional[Dict] = None):
     if video_path:
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
@@ -310,6 +356,36 @@ def open_input_source(camera_index: int, video_path: Optional[str]):
         pass
 
     print(f"Opened camera index {camera_index} (backend={used_backend})")
+
+    # Optionally print camera properties for diagnostics
+    if cam_opts and cam_opts.get('print_props'):
+        props = {
+            'FRAME_WIDTH': cv2.CAP_PROP_FRAME_WIDTH,
+            'FRAME_HEIGHT': cv2.CAP_PROP_FRAME_HEIGHT,
+            'FPS': cv2.CAP_PROP_FPS,
+            'BRIGHTNESS': getattr(cv2, 'CAP_PROP_BRIGHTNESS', None),
+            'CONTRAST': getattr(cv2, 'CAP_PROP_CONTRAST', None),
+            'SATURATION': getattr(cv2, 'CAP_PROP_SATURATION', None),
+            'HUE': getattr(cv2, 'CAP_PROP_HUE', None),
+            'GAIN': getattr(cv2, 'CAP_PROP_GAIN', None),
+            'EXPOSURE': getattr(cv2, 'CAP_PROP_EXPOSURE', None),
+            'AUTO_EXPOSURE': getattr(cv2, 'CAP_PROP_AUTO_EXPOSURE', None),
+            'WHITE_BALANCE_BLUE_U': getattr(cv2, 'CAP_PROP_WHITE_BALANCE_BLUE_U', None),
+            'AUTO_WB': getattr(cv2, 'CAP_PROP_AUTO_WB', None),
+        }
+        print("Camera properties:")
+        for name, pid in props.items():
+            if pid is None:
+                continue
+            try:
+                val = cap.get(pid)
+                if val is not None and val != 0 and not math.isnan(val):
+                    print(f" - {name}: {val}")
+                else:
+                    print(f" - {name}: {val}")
+            except Exception:
+                pass
+
     return cap
 
 
@@ -422,7 +498,11 @@ def save_csv(per_frame: List[Dict], out_path: str):
     df.to_csv(out_path, index=False)
 
 
-def run_scenario(scenario: str, duration: int, camera_index: int, video_path: Optional[str], show: bool):
+def run_scenario(scenario: str, duration: int, camera_index: int, video_path: Optional[str], show: bool,
+                 warmup_sec: float = 2.5,
+                 normalize_overlays: bool = False,
+                 gamma: float = 1.0,
+                 use_clahe: bool = False):
     out_dir = os.path.join('tested', scenario)
     ensure_dir(out_dir)
 
@@ -432,14 +512,14 @@ def run_scenario(scenario: str, duration: int, camera_index: int, video_path: Op
 
     # Run OpenCV with a fresh capture
     print(f"Running OpenCV for scenario '{scenario}'...")
-    cap1 = open_input_source(camera_index, video_path)
-    ocv_summary = run_on_stream(cap1, 'OpenCV', ocv, duration, show)
+    cap1 = open_input_source(camera_index, video_path, cam_opts={'print_props': True})
+    ocv_summary = run_on_stream(cap1, 'OpenCV', ocv, duration, show, warmup_sec=warmup_sec)
     cap1.release()
 
     # Run MediaPipe with a fresh capture (rewind video or reopen camera)
     print(f"Running MediaPipe for scenario '{scenario}'...")
-    cap2 = open_input_source(camera_index, video_path)
-    mp_summary = run_on_stream(cap2, 'MediaPipe', mpd, duration, show)
+    cap2 = open_input_source(camera_index, video_path, cam_opts={'print_props': True})
+    mp_summary = run_on_stream(cap2, 'MediaPipe', mpd, duration, show, warmup_sec=warmup_sec)
     cap2.release()
 
     if show:
@@ -448,11 +528,19 @@ def run_scenario(scenario: str, duration: int, camera_index: int, video_path: Op
         except Exception:
             pass
 
-    # Save overlay samples
+    # Save overlay samples (optionally normalized and stamped)
     if ocv_summary['overlay_sample'] is not None:
-        cv2.imwrite(os.path.join(out_dir, 'opencv.png'), ocv_summary['overlay_sample'])
+        img = ocv_summary['overlay_sample']
+        if normalize_overlays:
+            img = _apply_overlay_normalization(img, gamma=gamma, use_clahe=use_clahe)
+        img = _stamp_overlay_info(img, scenario, 'OpenCV')
+        cv2.imwrite(os.path.join(out_dir, 'opencv.png'), img)
     if mp_summary['overlay_sample'] is not None:
-        cv2.imwrite(os.path.join(out_dir, 'mediapipe.png'), mp_summary['overlay_sample'])
+        img = mp_summary['overlay_sample']
+        if normalize_overlays:
+            img = _apply_overlay_normalization(img, gamma=gamma, use_clahe=use_clahe)
+        img = _stamp_overlay_info(img, scenario, 'MediaPipe')
+        cv2.imwrite(os.path.join(out_dir, 'mediapipe.png'), img)
 
     # Save per-frame CSVs
     save_csv(ocv_summary['per_frame'], os.path.join(out_dir, 'opencv_metrics.csv'))
@@ -497,7 +585,14 @@ def parse_args():
     p.add_argument('--no-show', dest='show', action='store_false', help='Disable preview windows')
     p.add_argument('--list-cameras', dest='list_cameras', action='store_true', help='Probe and list available camera indices and exit')
     p.add_argument('--probe', dest='list_cameras', action='store_true', help='Alias for --list-cameras')
-    p.set_defaults(show=False, list_cameras=False)
+    # Exposure/brightness handling for overlays and camera warm-up
+    p.add_argument('--warmup-sec', type=float, default=2.5, help='Warm-up seconds to let auto-exposure settle')
+    p.add_argument('--normalize-overlays', dest='normalize_overlays', action='store_true', help='Apply gamma/CLAHE to saved overlays (visual only)')
+    p.add_argument('--no-normalize-overlays', dest='normalize_overlays', action='store_false', help='Do not normalize overlays')
+    p.add_argument('--gamma', type=float, default=1.4, help='Gamma value (>1 brightens) used when normalizing overlays')
+    p.add_argument('--clahe', dest='use_clahe', action='store_true', help='Use CLAHE on overlays when normalizing')
+    p.add_argument('--no-clahe', dest='use_clahe', action='store_false', help='Disable CLAHE on overlays')
+    p.set_defaults(show=False, list_cameras=False, normalize_overlays=False, use_clahe=False)
     return p.parse_args()
 
 
@@ -508,7 +603,17 @@ def main():
         list_available_cameras(max_index=5)
         return
     try:
-        run_scenario(args.scenario, args.duration, args.camera, args.video, args.show)
+        run_scenario(
+            args.scenario,
+            args.duration,
+            args.camera,
+            args.video,
+            args.show,
+            warmup_sec=args.warmup_sec,
+            normalize_overlays=args.normalize_overlays,
+            gamma=args.gamma,
+            use_clahe=args.use_clahe,
+        )
     except RuntimeError as e:
         # Friendly error without Python traceback
         print(f"Error: {e}")

@@ -18,6 +18,55 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import pandas as pd
 from collections import deque
 
+# --- Benchmark metric helpers to mirror benchmark.py ---
+import math
+
+def _compute_detection_accuracy(detection_hits):
+    if not detection_hits:
+        return 0.0
+    try:
+        arr = np.array(detection_hits, dtype=float)
+        return float(np.mean(arr))
+    except Exception:
+        return 0.0
+
+
+def _compute_stability_metrics(ears, pupil_centers):
+    metrics = {
+        'ear_std': float('nan'),
+        'ear_iqr': float('nan'),
+        'pupil_jitter': float('nan'),
+        'stability_score': float('nan')
+    }
+    try:
+        valid_ears = [e for e in ears if e is not None and not math.isnan(float(e)) and e > 0]
+        if len(valid_ears) >= 5:
+            arr = np.array(valid_ears, dtype=float)
+            metrics['ear_std'] = float(np.std(arr))
+            q75, q25 = np.percentile(arr, [75, 25])
+            metrics['ear_iqr'] = float(q75 - q25)
+        # pupil jitter
+        disps = []
+        prev = None
+        for c in pupil_centers:
+            if c is None:
+                prev = None
+                continue
+            if prev is not None:
+                disps.append(math.hypot(c[0]-prev[0], c[1]-prev[1]))
+            prev = c
+        if len(disps) > 0:
+            metrics['pupil_jitter'] = float(np.mean(disps))
+        # stability score (heuristic, same as benchmark.py)
+        ear_std = metrics['ear_std'] if not (isinstance(metrics['ear_std'], float) and math.isnan(metrics['ear_std'])) else 0.2
+        jitter = metrics['pupil_jitter'] if not (isinstance(metrics['pupil_jitter'], float) and math.isnan(metrics['pupil_jitter'])) else 3.0
+        ear_term = 1.0 - min(max((ear_std - 0.01) / (0.2 - 0.01), 0.0), 1.0)
+        jit_term = 1.0 - min(max((jitter - 0.5) / (5.0 - 0.5), 0.0), 1.0)
+        metrics['stability_score'] = float(0.5*ear_term + 0.5*jit_term)
+    except Exception:
+        pass
+    return metrics
+
 from opencv_detector import OpenCVEyeDetector
 from mediapipe_detector import MediaPipeEyeDetector
 from config import Config
@@ -391,55 +440,77 @@ class NEEDLELivenessApp:
             
             self.benchmark_progress['maximum'] = duration
             
+            # Per-frame series mirroring benchmark.py
+            per_frame_proc_ms = []
+            detection_hits = []  # 1.0 if any liveness result in frame else 0.0
+            ears_series = []     # average EAR across eyes per frame (NaN if none)
+            pupil_centers = []   # average pupil center (tuple) or None per frame
+
             while time.time() - start_time < duration:
                 ret, frame = self.camera.read()
                 if not ret:
                     continue
-                
+
                 # Process frame
                 process_start = time.time()
                 results = detector.process_frame(frame)
                 process_time = time.time() - process_start
-                
+
                 frame_count += 1
                 total_processing_time += process_time
-                
-                # Collect liveness scores
-                if results['liveness_results']:
-                    avg_score = np.mean([r['smoothed_score'] for r in results['liveness_results']])
-                    liveness_scores.append(avg_score)
+                per_frame_proc_ms.append(process_time * 1000.0)
+
+                # Detection hit and per-frame EAR
+                liveness = results.get('liveness_results', [])
+                hit = 1.0 if len(liveness) > 0 else 0.0
+                detection_hits.append(hit)
+
+                if liveness:
+                    ear_vals = [lr.get('ear', np.nan) for lr in liveness]
+                    ear = float(np.nanmean(ear_vals)) if np.any(~np.isnan(ear_vals)) else np.nan
                 else:
-                    # Ensure coverage parity across detectors by counting no-detection frames
-                    liveness_scores.append(0.0)
-                
+                    ear = np.nan
+                ears_series.append(ear)
+
+                # Average pupil center (if any eye provides it)
+                centers = []
+                for lr in liveness:
+                    pi = lr.get('pupil_info')
+                    if pi is not None:
+                        centers.append((float(pi[0]), float(pi[1])))
+                pupil_centers.append(tuple(np.nanmean(centers, axis=0)) if len(centers) > 0 else None)
+
                 # Update progress
                 elapsed = time.time() - start_time
                 self.benchmark_progress['value'] = elapsed
                 self.root.update_idletasks()
             
-            # Calculate metrics
+            # Calculate metrics (mirror benchmark.py definitions)
             elapsed_time = time.time() - start_time
-            fps = frame_count / elapsed_time
-            avg_processing_time = total_processing_time / frame_count if frame_count > 0 else 0
-            avg_liveness_score = np.mean(liveness_scores) if liveness_scores else 0
-            
+            avg_proc_ms = float(np.mean(per_frame_proc_ms)) if len(per_frame_proc_ms) else float('nan')
+            fps = 1000.0 / avg_proc_ms if avg_proc_ms and not math.isnan(avg_proc_ms) and avg_proc_ms > 0 else 0.0
+            accuracy = _compute_detection_accuracy(detection_hits)
+            stability = _compute_stability_metrics(ears_series, pupil_centers)
+
             # Store results
             benchmark_result = {
                 'detector': detector_name,
                 'fps': fps,
-                'avg_processing_time': avg_processing_time * 1000,  # Convert to ms
-                'avg_liveness_score': avg_liveness_score,
+                'avg_proc_ms': avg_proc_ms,
+                'accuracy': accuracy,
+                'stability': stability,
                 'total_frames': frame_count,
                 'duration': elapsed_time
             }
             self.benchmark_data.append(benchmark_result)
-            
+
             # Display results
             result_text = f"""
 {detector_name} Results:
+- Accuracy: {accuracy*100:.1f}%
+- Stability: {stability.get('stability_score', float('nan')):.3f}
 - FPS: {fps:.2f}
-- Avg Processing Time: {avg_processing_time*1000:.2f}ms
-- Avg Liveness Score: {avg_liveness_score:.3f}
+- Avg Processing Time: {avg_proc_ms:.2f}ms
 - Total Frames: {frame_count}
 - Duration: {elapsed_time:.2f}s
 """
@@ -450,17 +521,29 @@ class NEEDLELivenessApp:
         if len(self.benchmark_data) == 2:
             opencv_result = self.benchmark_data[0]
             mediapipe_result = self.benchmark_data[1]
-            
+
+            # Extract comparable fields
+            ocv_acc = opencv_result.get('accuracy', 0.0)
+            mp_acc = mediapipe_result.get('accuracy', 0.0)
+            ocv_stab = opencv_result.get('stability', {}).get('stability_score', float('nan'))
+            mp_stab = mediapipe_result.get('stability', {}).get('stability_score', float('nan'))
+            ocv_fps = opencv_result.get('fps', 0.0)
+            mp_fps = mediapipe_result.get('fps', 0.0)
+            ocv_ms = opencv_result.get('avg_proc_ms', float('nan'))
+            mp_ms = mediapipe_result.get('avg_proc_ms', float('nan'))
+
             comparison_text = f"""
-COMPARISON:
-- FPS: OpenCV {opencv_result['fps']:.2f} vs MediaPipe {mediapipe_result['fps']:.2f}
-- Processing Time: OpenCV {opencv_result['avg_processing_time']:.2f}ms vs MediaPipe {mediapipe_result['avg_processing_time']:.2f}ms
-- Accuracy: OpenCV {opencv_result['avg_liveness_score']:.3f} vs MediaPipe {mediapipe_result['avg_liveness_score']:.3f}
+COMPARISON (matches benchmark.py):
+- Accuracy: OpenCV {ocv_acc*100:.1f}% vs MediaPipe {mp_acc*100:.1f}%
+- Stability: OpenCV {ocv_stab:.3f} vs MediaPipe {mp_stab:.3f}
+- Speed (FPS): OpenCV {ocv_fps:.2f} vs MediaPipe {mp_fps:.2f}
+- Processing Time: OpenCV {ocv_ms:.2f}ms vs MediaPipe {mp_ms:.2f}ms
 
 Winner:
-- Speed: {'OpenCV' if opencv_result['fps'] > mediapipe_result['fps'] else 'MediaPipe'}
-- Efficiency: {'OpenCV' if opencv_result['avg_processing_time'] < mediapipe_result['avg_processing_time'] else 'MediaPipe'}
-- Accuracy: {'OpenCV' if opencv_result['avg_liveness_score'] > mediapipe_result['avg_liveness_score'] else 'MediaPipe'}
+- Accuracy: {'OpenCV' if ocv_acc > mp_acc else 'MediaPipe'}
+- Stability: {'OpenCV' if (ocv_stab if not (isinstance(ocv_stab, float) and math.isnan(ocv_stab)) else -1) > (mp_stab if not (isinstance(mp_stab, float) and math.isnan(mp_stab)) else -1) else 'MediaPipe'}
+- Speed (FPS): {'OpenCV' if ocv_fps > mp_fps else 'MediaPipe'}
+- Efficiency (Proc ms): {'OpenCV' if ocv_ms < mp_ms else 'MediaPipe'}
 """
             self.benchmark_text.insert(tk.END, comparison_text)
             self.benchmark_text.see(tk.END)

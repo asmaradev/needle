@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import time
 from typing import List, Tuple, Optional, Dict
-from utils import ImageProcessor, PerformanceMetrics
+from utils import ImageProcessor, PerformanceMetrics, EyeMovementAnalyzer
 from liveness_analyzer import LivenessDetector
 from config import Config
 
@@ -24,6 +24,12 @@ class OpenCVEyeDetector:
         self.image_processor = ImageProcessor()
         self.liveness_detector = LivenessDetector()
         self.performance_metrics = PerformanceMetrics()
+        self._ear_analyzer = EyeMovementAnalyzer()
+        
+        # Simple state to help stabilize pupil jitter metric
+        # Hold last detected pupil (pixel coords) per eye index for up to 1 missing frame
+        self._last_pupil_draw: Dict[int, Tuple[int, int, int]] = {}
+        self._pupil_hold: Dict[int, int] = {}
         
         # Tracking state
         self.last_face_rect = None
@@ -247,6 +253,17 @@ class OpenCVEyeDetector:
             # Detect pupil (pixel units)
             pupil_info_draw = self.detect_pupil(frame, eye_rect)
 
+            # Simple carry-over for 1 frame if detection is missing to help jitter continuity
+            if pupil_info_draw is None and i in self._last_pupil_draw and self._pupil_hold.get(i, 0) < 1:
+                pupil_info_draw = self._last_pupil_draw[i]
+                self._pupil_hold[i] = self._pupil_hold.get(i, 0) + 1
+            elif pupil_info_draw is not None:
+                self._last_pupil_draw[i] = pupil_info_draw
+                self._pupil_hold[i] = 0
+            else:
+                # No detection and no carry-over available
+                self._pupil_hold[i] = 0
+
             # Normalize pupil radius by eye width for liveness
             liveness_pupil_info = None
             if pupil_info_draw is not None:
@@ -263,11 +280,18 @@ class OpenCVEyeDetector:
                 liveness_result = self.liveness_detector.detect_liveness(
                     eye_landmarks, liveness_pupil_info
                 )
+                # Attach additional info
                 liveness_result['eye_index'] = i
                 liveness_result['eye_rect'] = eye_rect
                 liveness_result['landmarks'] = eye_landmarks
                 liveness_result['pupil_info'] = liveness_pupil_info
                 liveness_result['pupil_info_draw'] = pupil_info_draw
+                # Compute EAR so benchmark can aggregate stability metrics
+                try:
+                    ear_val = float(self._ear_analyzer.calculate_eye_aspect_ratio(eye_landmarks))
+                except Exception:
+                    ear_val = 0.0
+                liveness_result['ear'] = ear_val
                 
                 results['liveness_results'].append(liveness_result)
         
